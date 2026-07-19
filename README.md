@@ -1,9 +1,6 @@
 # SNATCH
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-  <img src="assets/logo-light.svg" alt="SNATCH" width="288">
-</picture>
+<img src="./downloads/ascii-art-text.png" alt="SNATCH" width="400">
 
 snatch any video. paste. snatch. done.
 
