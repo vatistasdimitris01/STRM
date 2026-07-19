@@ -29,7 +29,6 @@ import {
 } from './lib/ytdlp.js'
 
 const OUT_DIR = path.join(os.homedir(), 'Downloads')
-const YOINK_BUTTON = 'snatch'
 const DONE_LABEL = '↵ snatch another'
 const TAGLINE = 'snatch any video. paste. snatch. done.'
 
@@ -290,10 +289,6 @@ function AppContent({
     return undefined // ↑↓ / ↑ stay keyboard-only
   }
   const clickTargets: ClickTarget[] = []
-  if (phase.name === 'input') {
-    // the frame button rows above/below the label are part of the button
-    clickTargets.push({match: `  ${YOINK_BUTTON}  `, padY: 1, action: () => handleUrlSubmit(urlInput)})
-  }
   if (phase.name === 'picking') {
     for (const [index, choice] of choices.entries()) {
       clickTargets.push({match: choiceLabel(choice), action: () => handlePick({value: index})})
@@ -334,7 +329,7 @@ function AppContent({
 
       {phase.name === 'input' && (
         <Box flexDirection="column" alignItems="center">
-          <FramedInput title="Paste a link" width={boxWidth} button={YOINK_BUTTON}>
+          <FramedInput title="Paste a link" width={boxWidth}>
             <TextInput
               value={urlInput}
               onChange={setUrlInput}
@@ -354,13 +349,15 @@ function AppContent({
             <Text color={theme.gray} dimColor={theme.dimSecondary}>link in your clipboard — ⇥ to paste it</Text>
           ) : clipboardAccepted ? (
             <Text color={theme.gray} dimColor={theme.dimSecondary}>from your clipboard — ↵ to snatch it</Text>
-          ) : null}
+          ) : (
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>↵ to snatch</Text>
+          )}
         </Box>
       )}
 
       {phase.name === 'probing' && (
         <Box flexDirection="column" alignItems="center">
-          <FramedInput title={platform ? platform.label : 'Paste a link'} width={boxWidth} button={YOINK_BUTTON} buttonDim>
+          <FramedInput title={platform ? platform.label : 'Paste a link'} width={boxWidth} buttonDim>
             <Text color={theme.gray} dimColor={theme.dimSecondary}>{url.length > boxWidth - 8 ? `${url.slice(0, boxWidth - 9)}…` : url}</Text>
           </FramedInput>
         </Box>
