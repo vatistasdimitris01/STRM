@@ -7,7 +7,7 @@ Search any movie or series from your terminal. Type a name. Pick a result. Watch
 ## Install
 
 ```bash
-curl -fsSL https://strm.sh/install.sh | bash
+curl -fsSL https://strm-website.vercel.app/install.sh | bash
 ```
 
 ## Usage
