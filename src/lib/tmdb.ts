@@ -1,5 +1,5 @@
 const TMDB_BASE = 'https://api.themoviedb.org/3'
-const CONFIG_URL = 'https://strm.sh/api/config'
+const CONFIG_URL = 'https://strm-website.vercel.app/api/config'
 
 let cachedApiKey = ''
 let cachedReadToken = ''
