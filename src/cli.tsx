@@ -1,75 +1,46 @@
 import React from 'react'
-import {createRequire} from 'node:module'
 import {render} from 'ink'
-import {App, type Outcome} from './app.js'
-import {captureFrames} from './lib/click-map.js'
-import {parseArgs} from './lib/args.js'
-import {readClipboard} from './lib/clipboard.js'
-import {isProbablyUrl} from './lib/platforms.js'
-
-// read at runtime from the shipped package.json so npm version bumps
-// can't drift from a hardcoded constant
-const VERSION: string = createRequire(import.meta.url)('../package.json').version
+import {App} from './app.js'
 
 const HELP = `
-  snatch — snatch any video. paste. snatch. done.
+  strm — find any movie or series. type. search. watch.
 
   Usage
-    $ snatch [url]
-
-  Examples
-    $ snatch https://youtu.be/dQw4w9WgXcQ
-    $ snatch https://x.com/user/status/123456
-    $ snatch                 (prompts for a url)
+    $ strm
 
   Options
     --theme <mode>  use auto, light, or dark for this run
     -h, --help      show this help
     -v, --version   show version
-
-  Downloads are saved to ~/Downloads.
-  Powered by yt-dlp — YouTube, X, Instagram, Threads, TikTok & 1800+ sites.
 `
 
-const args = parseArgs(process.argv.slice(2))
+const args = process.argv.slice(2)
 
-if (args.error) {
-  console.error(`snatch: ${args.error}\nTry “snatch --help” for usage.`)
-  process.exit(1)
-}
-
-if (args.help) {
+if (args.includes('-h') || args.includes('--help')) {
   console.log(HELP)
   process.exit(0)
 }
 
-if (args.version) {
-  console.log(VERSION)
+if (args.includes('-v') || args.includes('--version')) {
+  const pkg = JSON.parse(new URL('../package.json', import.meta.url).pathname)
+  console.log(pkg.version)
   process.exit(0)
 }
 
-const initialUrl = args.initialUrl
-const initialThemeMode = args.themeMode ?? 'auto'
+let themeMode: 'auto' | 'light' | 'dark' = 'auto'
+const themeIdx = args.indexOf('--theme')
+if (themeIdx !== -1 && args[themeIdx + 1]) {
+  themeMode = args[themeIdx + 1] as any
+}
+
+const enterAltScreen = () => process.stdout.write('\x1b[?1049h\x1b[H')
+const leaveAltScreen = () => process.stdout.write('\x1b[?1049l')
 
 const isTTY = Boolean(process.stdout.isTTY)
-
-// no url given — offer the clipboard url (⇥ to paste) when it already holds one
-let clipboardUrl: string | undefined
-if (!initialUrl && isTTY) {
-  const clipped = readClipboard().trim()
-  // reject multi-line clipboard content — new URL() silently strips newlines
-  if (clipped && !/\s/.test(clipped) && isProbablyUrl(clipped)) clipboardUrl = clipped
-}
-const enterAltScreen = () => process.stdout.write('\x1b[?1049h\x1b[H')
-// also switch mouse tracking off — a crash can skip React effect cleanup
-const leaveAltScreen = () => process.stdout.write('\x1b[?1006l\x1b[?1000l\x1b[?1049l')
 
 if (isTTY) {
   enterAltScreen()
   process.on('exit', leaveAltScreen)
-  // restore the terminal BEFORE a crash prints, or the stack trace is
-  // wiped along with the alternate screen and the app looks like it
-  // silently quit
   for (const event of ['uncaughtException', 'unhandledRejection'] as const) {
     process.on(event, (error: unknown) => {
       leaveAltScreen()
@@ -79,21 +50,6 @@ if (isTTY) {
   }
 }
 
-let outcome: Outcome = {}
-const {waitUntilExit} = render(
-  <App
-    initialUrl={initialUrl}
-    clipboardUrl={clipboardUrl}
-    initialThemeMode={initialThemeMode}
-    onOutcome={result => (outcome = result)}
-  />,
-  // keep a copy of every frame so clicks can be hit-tested against it
-  {stdout: captureFrames(process.stdout)},
-)
-
+const {waitUntilExit} = render(<App initialThemeMode={themeMode} />)
 await waitUntilExit()
-
 if (isTTY) leaveAltScreen()
-if (outcome.filepath) {
-  console.log(`✓ snatched → ${outcome.filepath}`)
-}

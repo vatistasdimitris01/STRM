@@ -3,27 +3,23 @@ import {Box, Text} from 'ink'
 import {type Theme, useTheme} from '../theme.js'
 
 const ART = [
-  '  ░██████   ░███    ░██    ░███    ░██████████  ░██████  ░██     ░██ ',
-  ' ░██   ░██  ░████   ░██   ░██░██       ░██     ░██   ░██ ░██     ░██',
-  '░██         ░██░██  ░██  ░██  ░██      ░██    ░██        ░██     ░██',
-  ' ░████████  ░██ ░██ ░██ ░█████████     ░██    ░██        ░██████████',
-  '        ░██ ░██  ░██░██ ░██    ░██     ░██    ░██        ░██     ░██',
-  ' ░██   ░██  ░██   ░████ ░██    ░██     ░██     ░██   ░██ ░██     ░██',
-  '  ░██████   ░██    ░███ ░██    ░██     ░██      ░██████  ░██     ░██',
+  '  ░██████   ░██████████░█████████  ░███     ░███ ',
+  ' ░██   ░██      ░██    ░██     ░██ ░████   ░████ ',
+  '░██             ░██    ░██     ░██ ░██░██ ░██░██ ',
+  ' ░████████      ░██    ░█████████  ░██ ░████ ░██ ',
+  '        ░██     ░██    ░██   ░██   ░██  ░██  ░██ ',
+  ' ░██   ░██      ░██    ░██    ░██  ░██       ░██ ',
+  '  ░██████       ░██    ░██     ░██ ░██       ░██ ',
 ]
 const GRID = ART.map(line => [...line])
 const ROWS = GRID.length
 
-// intro: each glyph flickers in as ░, sharpens to ▒, then resolves
 const INTRO_MS = 900
 const INTRO_SPREAD_MS = 550
-// shimmer: a tilted beam crosses the glyphs, thinning them one density step
 const SWEEP_MS = 1000
 const SWEEP_EVERY_MS = 7_000
-const TILT = 2 // columns of lean per row — beam slants like /
-const HALF = 2.4 // beam half-width
-// full-cell blocks can swap to a lighter shade char; half-blocks (▀ ▄) must
-// keep their glyph or the effect spills outside the letterform — they dim instead
+const TILT = 2
+const HALF = 2.4
 const LIGHTER: Record<string, string> = {'█': '▒'}
 const HALF_BLOCKS = new Set(['▀', '▄'])
 
@@ -36,7 +32,6 @@ function cellAt(ch: string, row: number, col: number, phase: Phase, t: number, d
   if (phase === 'intro') {
     const dt = t - delay
     if (dt < 0) return {ch: ' ', color: theme.primary, dim: false}
-    // ░ is a structural glyph — it resolves directly without flickering through shades
     if (ch === '░') {
       if (dt < 110) return {ch: ' ', color: theme.primary, dim: false}
       return {ch, color: theme.gray, dim: theme.dimSecondary}
@@ -45,7 +40,6 @@ function cellAt(ch: string, row: number, col: number, phase: Phase, t: number, d
     if (dt < 220) return {ch: HALF_BLOCKS.has(ch) ? ch : '▒', color: theme.gray, dim: theme.dimSecondary}
     return {ch, color: theme.primary, dim: false}
   }
-  // sweep — beam position leans right as it climbs, only glyphs are touched
   const cols = GRID[0].length
   const pMin = -TILT * ROWS - HALF
   const pMax = cols + HALF
@@ -53,7 +47,6 @@ function cellAt(ch: string, row: number, col: number, phase: Phase, t: number, d
   const d = Math.abs(col - (ROWS - 1 - row) * TILT - p)
   if (d <= HALF && 1 - d / HALF > 0.35) {
     if (HALF_BLOCKS.has(ch)) return {ch, color: theme.gray, dim: theme.dimSecondary}
-    // ░ is already the lightest shade — dim it during sweep instead of lightening
     if (ch === '░') return {ch, color: theme.gray, dim: theme.dimSecondary}
     return {ch: LIGHTER[ch] ?? ch, color: theme.primary, dim: false}
   }
@@ -61,7 +54,6 @@ function cellAt(ch: string, row: number, col: number, phase: Phase, t: number, d
 }
 
 function renderRow(row: number, phase: Phase, t: number, delays: number[], theme: Theme) {
-  // group consecutive same-color cells so each row is a few Text spans, not 24
   const segments: Array<{text: string; color?: string; dim: boolean}> = []
   GRID[row].forEach((ch, col) => {
     const cell = cellAt(ch, row, col, phase, t, delays[col], theme)
@@ -110,8 +102,6 @@ export function Logo() {
   }, [phase, animated])
 
   return (
-    // flexShrink=0 — the logo must keep its 3 rows even when a phase's
-    // content would overflow the screen, or yoga crushes it first
     <Box flexDirection="column" flexShrink={0}>
       {GRID.map((_, row) => (
         <Text key={row}>{renderRow(row, phase, t, delays[row], theme)}</Text>

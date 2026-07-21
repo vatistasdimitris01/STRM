@@ -1,60 +1,27 @@
-import React, {useCallback, useEffect, useRef, useState} from 'react'
-import os from 'node:os'
-import path from 'node:path'
+import React, {useCallback, useEffect, useState} from 'react'
 import {Box, Text, useApp, useInput, useStdout} from 'ink'
-import SelectInput, {type IndicatorProps, type ItemProps} from 'ink-select-input'
 import Spinner from 'ink-spinner'
+import open from 'open'
 import {FramedInput} from './components/framed-input.js'
 import {FullScreen} from './components/fullscreen.js'
 import {Logo} from './components/logo.js'
-import {Panel} from './components/panel.js'
-import {ProgressBar} from './components/progress-bar.js'
 import {Shortcuts} from './components/shortcuts.js'
 import {TextInput} from './components/text-input.js'
-import {clickTargetAt, findFrameRow, frameRowSpan, type ClickTarget} from './lib/click-map.js'
-import {formatBytes, formatDuration, formatEta, formatSpeed, shortenPath, truncate, wrapText} from './lib/format.js'
-import {addToHistory, loadHistory} from './lib/history.js'
-import {detectPlatform, isProbablyUrl, type Platform} from './lib/platforms.js'
-import {useMouseClick} from './lib/use-mouse-click.js'
 import {ThemeProvider, type ThemeMode, useTheme} from './theme.js'
-import {
-  buildChoices,
-  download,
-  ensureYtDlp,
-  findFfmpeg,
-  probe,
-  type DownloadChoice,
-  type DownloadProgress,
-  type VideoInfo,
-} from './lib/ytdlp.js'
+import {searchTMDB, mediaTitle, mediaYear, mediaType, type MediaResult} from './lib/tmdb.js'
+import {ensurePlayerRunning, getPlayerUrl} from './lib/server.js'
+import {truncate, wrapText} from './lib/format.js'
 
-const OUT_DIR = path.join(os.homedir(), 'Downloads')
-const DONE_LABEL = '↵ snatch another'
-const TAGLINE = 'snatch any video. paste. snatch. done.'
+const TAGLINE = 'find any movie or series. type. search. done.'
 
-const choiceLabel = (choice: DownloadChoice) => `${choice.kind === 'audio' ? '♪ ' : '▶ '}${choice.label}`
+type Phase =
+  | {name: 'input'; warning?: string}
+  | {name: 'searching'}
+  | {name: 'results'; results: MediaResult[]; query: string}
+  | {name: 'empty'; query: string}
+  | {name: 'watching'; title: string; results: MediaResult[]; query: string}
+  | {name: 'error'; message: string}
 
-function ChoiceIndicator({isSelected}: IndicatorProps) {
-  const theme = useTheme()
-  return (
-    <Box marginRight={1}>
-      <Text color={theme.primary}>{isSelected ? '❯' : ' '}</Text>
-    </Box>
-  )
-}
-
-function ChoiceItem({isSelected, label}: ItemProps) {
-  const theme = useTheme()
-  return (
-    <Text color={theme.primary} bold={isSelected}>
-      {label}
-    </Text>
-  )
-}
-
-// explicit blank lines — empty <Box height={1}/> spacers can collapse, and
-// ink boxes default to flexShrink=1, so spacers are the first thing yoga
-// crushes when content overflows the terminal
 const Gap = ({lines = 1}: {lines?: number}) => (
   <Box flexDirection="column" flexShrink={0}>
     {Array.from({length: lines}, (_, i) => (
@@ -63,440 +30,299 @@ const Gap = ({lines = 1}: {lines?: number}) => (
   </Box>
 )
 
-// fixed-width slots — the centered line must not change width as values tick,
-// otherwise the whole layout shifts on every progress update
-function partLabel(progress: DownloadProgress): string {
-  // explains the bar resetting between files (video, then audio)
-  return progress.totalParts > 1 ? `part ${progress.part + 1}/${progress.totalParts}  ` : ''
-}
-
-function downloadMeta(progress: DownloadProgress): string {
-  const speed = progress.speed ? formatSpeed(progress.speed) : ''
-  const eta = progress.eta ? `${formatEta(progress.eta)} left` : ''
-  return `${partLabel(progress)}${speed.padStart(10)}  ${eta.padEnd(12)}`
-}
-
-function indeterminateMeta(progress: DownloadProgress): string {
-  const bytes = formatBytes(progress.downloadedBytes)
-  const speed = progress.speed ? formatSpeed(progress.speed) : ''
-  return `${partLabel(progress)}${bytes.padStart(8)}  ${speed.padEnd(10)}`
-}
-
-export type Outcome = {filepath?: string}
-
-type Phase =
-  | {name: 'input'; warning?: string}
-  | {name: 'probing'; status: string}
-  | {name: 'picking'}
-  | {
-      name: 'downloading'
-      choice: DownloadChoice
-      progress?: DownloadProgress
-      processing: boolean
-      refreshing?: boolean
-    }
-  | {name: 'done'; filepath: string}
-  | {name: 'error'; message: string}
-
-const HINTS: Record<Phase['name'], Array<[string, string]>> = {
-  input: [
-    ['↵', 'snatch'],
-    ['^c', 'quit'],
-  ],
-  probing: [
-    ['esc', 'cancel'],
-    ['^c', 'quit'],
-  ],
-  picking: [
-    ['↑↓', 'choose'],
-    ['↵', 'snatch'],
-    ['esc', 'back'],
-    ['^c', 'quit'],
-  ],
-  downloading: [
-    ['esc', 'cancel'],
-    ['^c', 'quit'],
-  ],
-  done: [['^c', 'quit']],
-  error: [
-    ['↵', 'try again'],
-    ['^c', 'quit'],
-  ],
-}
-
 type AppProps = {
-  initialUrl?: string
-  clipboardUrl?: string
   initialThemeMode?: ThemeMode
-  onOutcome: (outcome: Outcome) => void
 }
 
-export function App({initialThemeMode = 'auto', ...props}: AppProps) {
+export function App({initialThemeMode = 'auto'}: AppProps) {
   return (
     <ThemeProvider mode={initialThemeMode}>
-      <AppContent {...props} />
+      <AppContent />
     </ThemeProvider>
   )
 }
 
-function AppContent({
-  initialUrl,
-  clipboardUrl,
-  onOutcome,
-}: {
-  initialUrl?: string
-  clipboardUrl?: string
-  onOutcome: (outcome: Outcome) => void
-}) {
+function AppContent() {
   const theme = useTheme()
   const {exit} = useApp()
   const {stdout} = useStdout()
-  const [url, setUrl] = useState(initialUrl ?? '')
-  const [urlInput, setUrlInput] = useState('')
-  const [history, setHistory] = useState(loadHistory)
-  const [platform, setPlatform] = useState<Platform>()
-  const [info, setInfo] = useState<VideoInfo>()
-  const [choices, setChoices] = useState<DownloadChoice[]>([])
-  const ytdlpRef = useRef('')
-  const highlightRef = useRef(0) // choice under the cursor, for the ↵ hint click
-  const infoJsonRef = useRef<string | undefined>(undefined)
-  const abortRef = useRef<AbortController | undefined>(undefined)
-  const [phase, setPhase] = useState<Phase>(initialUrl ? {name: 'probing', status: 'warming up…'} : {name: 'input'})
+  const [query, setQuery] = useState('')
+  const [phase, setPhase] = useState<Phase>({name: 'input'})
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const [scrollOffset, setScrollOffset] = useState(0)
 
   const columns = stdout?.columns && stdout.columns > 0 ? stdout.columns : 80
+  const rows = stdout?.rows && stdout.rows > 1 ? stdout.rows : 24
   const boxWidth = Math.max(14, Math.min(64, columns - 6))
-  const contentWidth = Math.max(10, Math.min(columns - 4, 78))
+  const contentWidth = Math.max(10, columns - 4)
 
-  const startProbe = useCallback(async (targetUrl: string) => {
-    const controller = new AbortController()
-    abortRef.current = controller
-    setPlatform(detectPlatform(targetUrl))
-    setPhase({name: 'probing', status: 'warming up…'})
+  const useDualColumn = columns >= 90 && phase.name === 'results' && phase.results.length > 8
+  const panelWidth = useDualColumn ? Math.floor(contentWidth * 0.5) : contentWidth
+  const infoWidth = useDualColumn ? contentWidth - panelWidth - 3 : 0
+  const maxVisible = Math.max(4, rows - 14)
+
+  // Keep selected item visible in scroll window
+  useEffect(() => {
+    if (phase.name !== 'results') return
+    if (selectedIndex < scrollOffset) setScrollOffset(selectedIndex)
+    if (selectedIndex >= scrollOffset + maxVisible) setScrollOffset(selectedIndex - maxVisible + 1)
+  }, [selectedIndex, maxVisible, phase.name])
+
+  const handleSearch = useCallback(async (q: string) => {
+    const trimmed = q.trim()
+    if (!trimmed) return
+    setPhase({name: 'searching'})
     try {
-      const ytdlp =
-        ytdlpRef.current ||
-        (await ensureYtDlp(status => setPhase({name: 'probing', status}), controller.signal))
-      ytdlpRef.current = ytdlp
-      if (controller.signal.aborted) return
-      setPhase({name: 'probing', status: 'fetching video info…'})
-      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
-      if (controller.signal.aborted) return
-      infoJsonRef.current = infoJsonPath
-      setInfo(videoInfo)
-      setChoices(buildChoices(videoInfo))
-      highlightRef.current = 0
-      setPhase({name: 'picking'})
-    } catch (error) {
-      if (controller.signal.aborted) return
-      setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
+      const results = await searchTMDB(trimmed)
+      if (results.length === 0) {
+        setPhase({name: 'empty', query: trimmed})
+      } else {
+        setSelectedIndex(0)
+        setScrollOffset(0)
+        setPhase({name: 'results', results, query: trimmed})
+      }
+    } catch (err) {
+      setPhase({name: 'error', message: err instanceof Error ? err.message : String(err)})
     }
   }, [])
 
-  useEffect(() => {
-    if (initialUrl) void startProbe(initialUrl)
-  }, [initialUrl, startProbe])
-
-  const resetToInput = useCallback(() => {
-    setUrl('')
-    setUrlInput('')
-    setPlatform(undefined)
-    setInfo(undefined)
-    setChoices([])
-    setPhase({name: 'input'})
+  const handleWatch = useCallback(async (result: MediaResult, results: MediaResult[], query: string) => {
+    const title = mediaTitle(result)
+    setPhase({name: 'watching', title, results, query})
+    try {
+      await ensurePlayerRunning()
+      const url = getPlayerUrl(result)
+      await open(url)
+      setTimeout(() => {
+        setPhase(prev => {
+          if (prev.name === 'watching') return {name: 'results', results: prev.results, query: prev.query}
+          return prev
+        })
+      }, 1500)
+    } catch (err) {
+      setPhase({name: 'error', message: err instanceof Error ? err.message : String(err)})
+    }
   }, [])
 
-  const cancelRun = useCallback(() => {
-    abortRef.current?.abort()
-    resetToInput()
-    setUrlInput(url) // keep the link around so a cancel isn't destructive
-  }, [resetToInput, url])
-
-  useInput(
-    (input, key) => {
-      if (key.escape && (phase.name === 'picking' || phase.name === 'error' || phase.name === 'done')) resetToInput()
-      if (key.escape && (phase.name === 'probing' || phase.name === 'downloading')) cancelRun()
-      if (key.return && (phase.name === 'error' || phase.name === 'done')) resetToInput()
-    },
-    {isActive: Boolean(process.stdin.isTTY)},
-  )
-
-  const handleUrlSubmit = (value: string) => {
-    const trimmed = value.trim()
-    if (!isProbablyUrl(trimmed)) {
-      setPhase({name: 'input', warning: 'that doesn’t look like a link — paste a full url'})
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      exit()
       return
     }
-    setUrl(trimmed)
-    void startProbe(trimmed)
-  }
 
-  const clipboardOffered = Boolean(clipboardUrl) && urlInput === ''
-  const clipboardAccepted = Boolean(clipboardUrl) && urlInput === clipboardUrl
-
-  const handlePick = (item: {value: number}) => {
-    const choice = choices[item.value]
-    const controller = new AbortController()
-    abortRef.current = controller
-    setPhase({name: 'downloading', choice, processing: false})
-    void (async () => {
-      const handlers = {
-        onProgress: (progress: DownloadProgress) =>
-          setPhase(prev => (prev.name === 'downloading' ? {...prev, progress, processing: false} : prev)),
-        onProcessing: () =>
-          setPhase(prev => (prev.name === 'downloading' ? {...prev, processing: true} : prev)),
-      }
-      try {
-        const ffmpegLocation = await findFfmpeg()
-        const base = {ytdlp: ytdlpRef.current, ffmpegLocation, url, choice, outDir: OUT_DIR}
-        let filepath: string
-        try {
-          // reuse the probe's metadata — starts immediately instead of re-extracting
-          filepath = await download({...base, infoJsonPath: infoJsonRef.current}, handlers, controller.signal)
-        } catch (error) {
-          if (controller.signal.aborted) throw error
-          // media urls in the cached info can expire — retry with a fresh extraction
-          setPhase(prev =>
-            prev.name === 'downloading' ? {...prev, progress: undefined, refreshing: true} : prev,
-          )
-          filepath = await download(base, handlers, controller.signal)
-        }
-        onOutcome({filepath})
-        setHistory(addToHistory(url))
-        setPhase({name: 'done', filepath})
-      } catch (error) {
-        if (controller.signal.aborted) return
-        setPhase({name: 'error', message: error instanceof Error ? error.message : String(error)})
-      }
-    })()
-  }
-
-  let hints: Array<[string, string]> = [...HINTS[phase.name]]
-  if (phase.name === 'input' && history.length > 0) {
-    hints = [hints[0]!, ['↑', 'history'], ...hints.slice(1)]
-  }
-
-  // Anything a mouse user would expect to press is clickable. Targets are
-  // found by their text in the rendered frame (see lib/click-map.ts), so
-  // there is no layout math to keep in sync.
-  const hintAction = (key: string): (() => void) | undefined => {
-    if (key === '^c') return () => exit()
-    if (key === 'esc') return phase.name === 'probing' || phase.name === 'downloading' ? cancelRun : resetToInput
-    if (key === '↵') {
-      if (phase.name === 'input') return () => handleUrlSubmit(urlInput)
-      if (phase.name === 'picking') return () => handlePick({value: highlightRef.current})
-      if (phase.name === 'error' || phase.name === 'done') return resetToInput
+    if (phase.name === 'error') {
+      if (key.escape || key.return) setPhase({name: 'input'})
+      return
     }
-    return undefined // ↑↓ / ↑ stay keyboard-only
-  }
-  const clickTargets: ClickTarget[] = []
-  if (phase.name === 'picking') {
-    for (const [index, choice] of choices.entries()) {
-      clickTargets.push({match: choiceLabel(choice), action: () => handlePick({value: index})})
+
+    if (phase.name === 'results') {
+      if (key.upArrow) {
+        setSelectedIndex(i => Math.max(0, i - 1))
+        return
+      }
+      if (key.downArrow) {
+        setSelectedIndex(i => Math.min(phase.results.length - 1, i + 1))
+        return
+      }
+      if (key.pageUp) {
+        setSelectedIndex(i => Math.max(0, i - maxVisible))
+        return
+      }
+      if (key.pageDown) {
+        setSelectedIndex(i => Math.min(phase.results.length - 1, i + maxVisible))
+        return
+      }
+      if (key.home) {
+        setSelectedIndex(0)
+        return
+      }
+      if (key.end) {
+        setSelectedIndex(phase.results.length - 1)
+        return
+      }
+      if (key.escape) {
+        setPhase({name: 'input'})
+        return
+      }
+      if (key.return) {
+        const r = phase.results[selectedIndex]
+        if (r) void handleWatch(r, phase.results, phase.query)
+        return
+      }
     }
-  }
-  if (phase.name === 'done') {
-    clickTargets.push({match: DONE_LABEL, padX: 4, padY: 1, action: resetToInput})
-  }
-  for (const [key, label] of hints) {
-    const action = hintAction(key)
-    if (action) clickTargets.push({match: `${key} ${label}`, action})
+
+    if (phase.name === 'empty') {
+      if (key.escape || key.return) setPhase({name: 'input'})
+      return
+    }
+
+    if (phase.name === 'watching') return
+  })
+
+  const handleSubmit = (value: string) => {
+    void handleSearch(value)
   }
 
-  useMouseClick(
-    (x, y) => {
-      // the logo takes you home — it's the 3 rows one gap above the tagline
-      const taglineRow = findFrameRow(TAGLINE)
-      if (taglineRow > 3 && y - 1 >= taglineRow - 4 && y - 1 <= taglineRow - 2) {
-        const span = frameRowSpan(y - 1)
-        if (span && x >= span[0] - 1 && x <= span[1] + 1) {
-          if (phase.name === 'probing' || phase.name === 'downloading') cancelRun()
-          else if (phase.name !== 'input') resetToInput()
-          return
-        }
-      }
-      clickTargetAt(x, y, clickTargets)?.action()
-    },
-    Boolean(process.stdin.isTTY),
-  )
+  const hints: Array<[string, string]> = (() => {
+    switch (phase.name) {
+      case 'input':
+        return [['↵', 'search'], ['^c', 'quit']]
+      case 'searching':
+        return [['esc', 'cancel'], ['^c', 'quit']]
+      case 'results':
+        return [['↑↓', 'choose'], ['pg', 'scroll'], ['↵', 'watch'], ['esc', 'back'], ['^c', 'quit']]
+      case 'empty':
+        return [['↵', 'search again'], ['esc', 'back'], ['^c', 'quit']]
+      case 'watching':
+        return [['esc', 'back'], ['^c', 'quit']]
+      case 'error':
+        return [['↵', 'try again'], ['^c', 'quit']]
+    }
+  })()
 
   return (
     <FullScreen>
       <Logo />
       <Gap />
       <Text color={theme.primary}>{TAGLINE}</Text>
-      <Text color={theme.gray} dimColor={theme.dimSecondary}>youtube · x · instagram · threads · tiktok · +1800 more</Text>
+      <Text color={theme.gray} dimColor={theme.dimSecondary}>movies · series · animation · docs</Text>
       <Gap />
 
       {phase.name === 'input' && (
         <Box flexDirection="column" alignItems="center">
-          <FramedInput title="Paste a link" width={boxWidth}>
+          <FramedInput title="Search any movie or series" width={boxWidth}>
             <TextInput
-              value={urlInput}
-              onChange={setUrlInput}
-              onSubmit={handleUrlSubmit}
-              placeholder="https://youtube.com/watch?v=…"
+              value={query}
+              onChange={setQuery}
+              onSubmit={handleSubmit}
+              placeholder="Inception, Breaking Bad, Dune…"
               width={boxWidth - 6}
-              history={history}
-              submitOnPaste={isProbablyUrl}
-              onTab={() => {
-                if (clipboardOffered) setUrlInput(clipboardUrl!)
-              }}
             />
           </FramedInput>
           {phase.warning ? (
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>✗ {phase.warning}</Text>
-          ) : clipboardOffered ? (
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>link in your clipboard — ⇥ to paste it</Text>
-          ) : clipboardAccepted ? (
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>from your clipboard — ↵ to snatch it</Text>
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>× {phase.warning}</Text>
           ) : (
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>↵ to snatch</Text>
+            <Text color={theme.gray} dimColor={theme.dimSecondary}>↵ to search</Text>
           )}
         </Box>
       )}
 
-      {phase.name === 'probing' && (
+      {phase.name === 'searching' && (
         <Box flexDirection="column" alignItems="center">
-          <FramedInput title={platform ? platform.label : 'Paste a link'} width={boxWidth} buttonDim>
-            <Text color={theme.gray} dimColor={theme.dimSecondary}>{url.length > boxWidth - 8 ? `${url.slice(0, boxWidth - 9)}…` : url}</Text>
-          </FramedInput>
-        </Box>
-      )}
-
-      {phase.name === 'picking' && platform && (
-        <Box width={contentWidth}>
-          <Box flexDirection="column" flexGrow={1} flexBasis={0} paddingTop={1} paddingRight={3}>
-            {/* wrapped by hand so continuation lines stay flush left —
-                ink's wrapping keeps the break's space as a 1-cell indent */}
-            {wrapText(info?.title ?? '', Math.max(10, contentWidth - 41)).map((line, index) => (
-              <Text key={index} bold color={theme.primary}>
-                {line}
-              </Text>
-            ))}
-            <Gap />
+          <FramedInput title="Search any movie or series" width={boxWidth} buttonDim>
             <Text color={theme.gray} dimColor={theme.dimSecondary}>
-              ▸ {platform.label}
-              {info?.duration ? ` · ${formatDuration(info.duration)}` : ''}
-              {info?.uploader ? ` · ${info.uploader}` : ''}
+              {query.length > boxWidth - 8 ? `${query.slice(0, boxWidth - 9)}…` : query}
             </Text>
-          </Box>
-          <Panel title="Download" width={38}>
-            <SelectInput
-              indicatorComponent={ChoiceIndicator}
-              itemComponent={ChoiceItem}
-              items={choices.map((choice, index) => ({
-                key: String(index),
-                label: choiceLabel(choice),
-                value: index,
-              }))}
-              onSelect={handlePick}
-              onHighlight={item => (highlightRef.current = item.value)}
-            />
-          </Panel>
+          </FramedInput>
+          <Gap />
+          <Text color={theme.gray} dimColor={theme.dimSecondary}>
+            <Spinner type="dots" /> searching…
+          </Text>
         </Box>
       )}
 
-      {phase.name === 'downloading' && (
+      {phase.name === 'results' && (
+        <Box width={contentWidth} flexDirection={useDualColumn ? 'row' : 'column'}>
+          {useDualColumn && (
+            <Box flexDirection="column" width={infoWidth} paddingRight={3} paddingTop={1}>
+              {phase.results[selectedIndex] && (() => {
+                const r = phase.results[selectedIndex]!
+                return (
+                  <>
+                    {wrapText(mediaTitle(r), Math.max(10, infoWidth - 4)).map((line, i) => (
+                      <Text key={i} bold color={theme.primary}>{line}</Text>
+                    ))}
+                    <Gap />
+                    <Text color={theme.gray} dimColor={theme.dimSecondary}>
+                      ▸ {mediaType(r)}{r.vote_average ? ` · ${r.vote_average.toFixed(1)}` : ''}{r.release_date || r.first_air_date ? ` · ${(r.release_date || r.first_air_date)!.slice(0, 4)}` : ''}
+                    </Text>
+                    {r.overview && (
+                      <>
+                        <Gap />
+                        {wrapText(truncate(r.overview, 200), Math.max(10, infoWidth - 4)).slice(0, 5).map((line, i) => (
+                          <Text key={i} color={theme.gray} dimColor={theme.dimSecondary}>{line}</Text>
+                        ))}
+                      </>
+                    )}
+                  </>
+                )
+              })()}
+            </Box>
+          )}
+          <Box flexDirection="column" width={useDualColumn ? panelWidth : contentWidth} paddingTop={1}>
+            {!useDualColumn && phase.results[selectedIndex] && (() => {
+              const r = phase.results[selectedIndex]!
+              return (
+                <Box marginBottom={1} flexDirection="column">
+                  {wrapText(mediaTitle(r), Math.max(10, contentWidth - 4)).map((line, i) => (
+                    <Text key={i} bold color={theme.primary}>{line}</Text>
+                  ))}
+                  <Text color={theme.gray} dimColor={theme.dimSecondary}>
+                    ▸ {mediaType(r)}{r.vote_average ? ` · ${r.vote_average.toFixed(1)}` : ''}{r.release_date || r.first_air_date ? ` · ${(r.release_date || r.first_air_date)!.slice(0, 4)}` : ''}
+                  </Text>
+                </Box>
+              )
+            })()}
+            <Box flexDirection="column" borderStyle="round" borderColor={theme.gray} borderDimColor={theme.dimSecondary} borderTop={false} borderBottom={false} borderLeft={false} borderRight={false} paddingX={1} paddingTop={0} paddingBottom={0}>
+              <Text color={theme.gray} dimColor={theme.dimSecondary}>
+                {'╭─ Results ' + '─'.repeat(Math.max(0, (useDualColumn ? panelWidth : contentWidth) - 14)) + '╮'}
+              </Text>
+              {phase.results.slice(scrollOffset, scrollOffset + maxVisible).map((r, i) => {
+                const absoluteIndex = scrollOffset + i
+                const isSelected = absoluteIndex === selectedIndex
+                const rowWidth = (useDualColumn ? panelWidth : contentWidth) - 4
+                const title = truncate(mediaTitle(r), Math.max(10, rowWidth - 22))
+                const year = mediaYear(r)
+                const type = mediaType(r)
+                const indicator = isSelected ? '›' : ' '
+                const pad = Math.max(0, rowWidth - title.length - year.length - type.length - 6)
+                return (
+                  <Text key={r.id} color={isSelected ? theme.primary : theme.gray} dimColor={!isSelected && theme.dimSecondary} bold={isSelected}>
+                    {indicator} {title}{' '.repeat(pad)}{year} {type}
+                  </Text>
+                )
+              })}
+              {phase.results.length > maxVisible && (
+                <Text color={theme.gray} dimColor={theme.dimSecondary}>
+                  {scrollOffset > 0 ? '  ↑ more above' : ''}
+                  {scrollOffset + maxVisible < phase.results.length ? '  ↓ more below' : ''}
+                </Text>
+              )}
+              <Text color={theme.gray} dimColor={theme.dimSecondary}>
+                {'╰' + '─'.repeat(Math.max(0, (useDualColumn ? panelWidth : contentWidth) - 4)) + '╯'}
+              </Text>
+            </Box>
+          </Box>
+        </Box>
+      )}
+
+      {phase.name === 'empty' && (
         <Box flexDirection="column" alignItems="center">
           <Text color={theme.gray} dimColor={theme.dimSecondary}>
-            {info?.title ? `${truncate(info.title, 42)} · ` : ''}
-            {phase.choice.label}
+            × no results for <Text color={theme.primary}>"{truncate(phase.query, 40)}"</Text>
           </Text>
           <Gap />
-          {/* every branch is exactly three rows — bar, gap, meta — so the layout never jumps */}
-          {phase.processing ? (
-            <>
-              <ProgressBar percent={1} />
-              <Gap />
-              <Text>
-                <Text color={theme.primary}>
-                  <Spinner type="dots" />
-                </Text>
-                <Text color={theme.gray} dimColor={theme.dimSecondary}> processing…</Text>
-              </Text>
-            </>
-          ) : phase.progress?.totalBytes ? (
-            <>
-              <ProgressBar percent={phase.progress.downloadedBytes / phase.progress.totalBytes} />
-              <Gap />
-              <Text color={theme.gray} dimColor={theme.dimSecondary}>{downloadMeta(phase.progress)}</Text>
-            </>
-          ) : phase.progress ? (
-            <>
-              <Text>
-                <Text color={theme.primary}>
-                  <Spinner type="dots" />
-                </Text>
-                <Text color={theme.gray} dimColor={theme.dimSecondary}> downloading…</Text>
-              </Text>
-              <Gap />
-              <Text color={theme.gray} dimColor={theme.dimSecondary}>{indeterminateMeta(phase.progress)}</Text>
-            </>
-          ) : (
-            <>
-              <ProgressBar percent={0} />
-              <Gap />
-              <Text>
-                <Text color={theme.primary}>
-                  <Spinner type="dots" />
-                </Text>
-                <Text color={theme.gray} dimColor={theme.dimSecondary}>
-                  {phase.refreshing ? ' link expired — grabbing a fresh one…' : ' starting download…'}
-                </Text>
-              </Text>
-            </>
-          )}
+          <Text color={theme.gray} dimColor={theme.dimSecondary}>check the spelling or try another title.</Text>
         </Box>
       )}
 
-      {phase.name === 'done' && (
+      {phase.name === 'watching' && (
         <Box flexDirection="column" alignItems="center">
-          <Text>
-            <Text bold color={theme.primary}>✓ snatched! </Text>
-            <Text color={theme.primary}>find your file in:</Text>
+          <Text color={theme.primary}>
+            <Spinner type="dots" />
           </Text>
-          <Text color={theme.gray} dimColor={theme.dimSecondary}>{shortenPath(phase.filepath, os.homedir(), 60)}</Text>
-          <Gap />
-          <Box
-            borderStyle="round"
-            borderColor={theme.gray}
-            borderDimColor={theme.dimSecondary}
-            borderBackgroundColor={theme.background}
-            paddingX={3}
-          >
-            <Text bold color={theme.primary}>{DONE_LABEL}</Text>
-          </Box>
+          <Text color={theme.gray} dimColor={theme.dimSecondary}> opening {truncate(phase.title, 30)} in browser…</Text>
         </Box>
       )}
 
       {phase.name === 'error' && (
-        <Box flexDirection="column" alignItems="center" width={Math.max(10, Math.min(columns - 6, 72))}>
-          <Text bold color={theme.primary}>✗ {phase.message}</Text>
+        <Box flexDirection="column" alignItems="center">
+          <Text bold color={theme.primary}>× {phase.message}</Text>
         </Box>
       )}
 
-      {hints.length > 0 ? (
-        <>
-          <Gap lines={2} />
-          <Text color={theme.gray} dimColor={theme.dimSecondary} justifyContent="center">
-            dvatistas.vercel.app · built by vatistasdimitris
-          </Text>
-          <Gap />
-          <Shortcuts
-            items={hints}
-            leading={
-              phase.name === 'probing' ? (
-                <Text>
-                  <Text color={theme.primary}>
-                    <Spinner type="dots" />
-                  </Text>
-                  <Text color={theme.gray} dimColor={theme.dimSecondary}> {phase.status}</Text>
-                </Text>
-              ) : undefined
-            }
-          />
-        </>
-      ) : null}
+      <Gap lines={2} />
+      <Shortcuts items={hints} />
     </FullScreen>
   )
 }

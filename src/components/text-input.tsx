@@ -1,7 +1,11 @@
 import React, {useRef, useState} from 'react'
 import {Text, useInput} from 'ink'
-import {stripMouseReports} from '../lib/use-mouse-click.js'
 import {useTheme} from '../theme.js'
+
+function stripMouseReports(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[<[\d;]*[Mm]/g, '')
+}
 
 type Props = {
   value: string
